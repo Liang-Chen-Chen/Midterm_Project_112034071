@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import {
   collection, query, orderBy, onSnapshot,
-  addDoc, updateDoc, doc, serverTimestamp, getDoc,
+  addDoc, updateDoc, doc, serverTimestamp, getDoc, arrayUnion, getDocs, where,
 } from "firebase/firestore";
 import { ref, uploadBytes, getDownloadURL } from "firebase/storage";
 import { db, storage } from "../firebase";
@@ -14,32 +14,36 @@ export default function ChatArea({ room, onToggleSidebar, onSearchOpen, searchOp
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState("");
   const [editingId, setEditingId] = useState(null);
-  const [replyTo, setReplyTo] = useState(null); // { id, text, senderName }
-  const [contextMenu, setContextMenu] = useState(null); // { x, y, msg }
+  const [replyTo, setReplyTo] = useState(null);
+  const [contextMenu, setContextMenu] = useState(null);
   const [searchQuery, setSearchQuery] = useState("");
   const [searchResults, setSearchResults] = useState([]);
   const [memberProfiles, setMemberProfiles] = useState({});
   const [highlightedId, setHighlightedId] = useState(null);
+  const [showInvite, setShowInvite] = useState(false);
+  const [inviteEmail, setInviteEmail] = useState("");
+  const [inviteError, setInviteError] = useState("");
+  const [inviteLoading, setInviteLoading] = useState(false);
   const bottomRef = useRef();
   const msgRefs = useRef({});
   const fileRef = useRef();
   const inputRef = useRef();
 
-  // Load member profiles
+  // Load member profiles — re-run whenever room.members changes
   useEffect(() => {
     if (!room) return;
     room.members.forEach(async (uid) => {
-      if (memberProfiles[uid]) return;
       const snap = await getDoc(doc(db, "users", uid));
       if (snap.exists()) {
         setMemberProfiles((prev) => ({ ...prev, [uid]: snap.data() }));
       }
     });
-  }, [room]);
+  }, [room?.members?.join(",")]); // re-run when member list changes
 
   // Subscribe to messages
   useEffect(() => {
     if (!room) return;
+    setMemberProfiles({}); // reset when switching rooms
     const q = query(collection(db, "rooms", room.id, "messages"), orderBy("createdAt", "asc"));
     const unsub = onSnapshot(q, (snap) => {
       setMessages(snap.docs.map((d) => ({ id: d.id, ...d.data() })));
@@ -63,6 +67,28 @@ export default function ChatArea({ room, onToggleSidebar, onSearchOpen, searchOp
       el.scrollIntoView({ behavior: "smooth", block: "center" });
       setHighlightedId(id);
       setTimeout(() => setHighlightedId(null), 1500);
+    }
+  }
+
+  // Invite member to existing room
+  async function handleInvite() {
+    if (!inviteEmail.trim()) return;
+    setInviteError("");
+    setInviteLoading(true);
+    try {
+      const q = query(collection(db, "users"), where("email", "==", inviteEmail.trim()));
+      const snap = await getDocs(q);
+      if (snap.empty) { setInviteError("No user found with that email."); return; }
+      const found = snap.docs[0].data();
+      if (room.members.includes(found.uid)) { setInviteError("Already a member."); return; }
+      await updateDoc(doc(db, "rooms", room.id), {
+        members: arrayUnion(found.uid),
+        isGroup: true,
+      });
+      setInviteEmail("");
+      setShowInvite(false);
+    } finally {
+      setInviteLoading(false);
     }
   }
 
@@ -93,7 +119,6 @@ export default function ChatArea({ room, onToggleSidebar, onSearchOpen, searchOp
     };
 
     await addDoc(collection(db, "rooms", room.id, "messages"), msgData);
-    // Update room last message
     await updateDoc(doc(db, "rooms", room.id), {
       lastMessage: text.substring(0, 60),
       lastMessageAt: serverTimestamp(),
@@ -105,24 +130,28 @@ export default function ChatArea({ room, onToggleSidebar, onSearchOpen, searchOp
   async function handleImageUpload(e) {
     const file = e.target.files[0];
     if (!file) return;
-    const storageRef = ref(storage, `chatImages/${room.id}/${Date.now()}_${file.name}`);
-    await uploadBytes(storageRef, file);
-    const url = await getDownloadURL(storageRef);
-    const msgData = {
-      text: "",
-      imageUrl: url,
-      senderId: user.uid,
-      senderName: userProfile?.username || user.email,
-      senderPhoto: userProfile?.photoURL || "",
-      createdAt: serverTimestamp(),
-      unsent: false,
-      type: "image",
-    };
-    await addDoc(collection(db, "rooms", room.id, "messages"), msgData);
-    await updateDoc(doc(db, "rooms", room.id), {
-      lastMessage: "📷 Image",
-      lastMessageAt: serverTimestamp(),
-    });
+    try {
+      const storageRef = ref(storage, `chatImages/${room.id}/${Date.now()}_${file.name}`);
+      await uploadBytes(storageRef, file);
+      const url = await getDownloadURL(storageRef);
+      const msgData = {
+        text: "",
+        imageUrl: url,
+        senderId: user.uid,
+        senderName: userProfile?.username || user.email,
+        senderPhoto: userProfile?.photoURL || "",
+        createdAt: serverTimestamp(),
+        unsent: false,
+        type: "image",
+      };
+      await addDoc(collection(db, "rooms", room.id, "messages"), msgData);
+      await updateDoc(doc(db, "rooms", room.id), {
+        lastMessage: "📷 Image",
+        lastMessageAt: serverTimestamp(),
+      });
+    } catch (err) {
+      alert("Failed to upload image: " + err.message);
+    }
     e.target.value = "";
   }
 
@@ -158,7 +187,7 @@ export default function ChatArea({ room, onToggleSidebar, onSearchOpen, searchOp
   }
 
   const senderName = useCallback(
-    (senderId) => memberProfiles[senderId]?.username || memberProfiles[senderId]?.email || "Unknown",
+    (senderId) => memberProfiles[senderId]?.username || memberProfiles[senderId]?.email || "...",
     [memberProfiles]
   );
   const senderPhoto = useCallback(
@@ -169,7 +198,6 @@ export default function ChatArea({ room, onToggleSidebar, onSearchOpen, searchOp
   if (!room) {
     return (
       <div className="chat-area">
-        {/* Mobile header */}
         <div className="chat-header">
           <button className="hamburger" onClick={onToggleSidebar}>☰</button>
           <span style={{ color: "var(--text-muted)", fontWeight: 600 }}>Chatroom</span>
@@ -199,8 +227,46 @@ export default function ChatArea({ room, onToggleSidebar, onSearchOpen, searchOp
             </div>
           </div>
         </div>
-        <button className="icon-btn" onClick={onSearchOpen} title="Search messages">🔍</button>
+        <div style={{ display: "flex", gap: 4 }}>
+          {/* Invite button */}
+          <button className="icon-btn" onClick={() => setShowInvite(true)} title="Invite member">➕</button>
+          <button className="icon-btn" onClick={onSearchOpen} title="Search messages">🔍</button>
+        </div>
       </div>
+
+      {/* Invite Modal */}
+      {showInvite && (
+        <div className="modal-overlay" onClick={(e) => e.target === e.currentTarget && setShowInvite(false)}>
+          <div className="modal animate-scaleIn">
+            <div className="modal-header">
+              <h2>Invite Member</h2>
+              <button className="icon-btn" onClick={() => setShowInvite(false)}>✕</button>
+            </div>
+            <div className="modal-body">
+              <div className="form-group">
+                <label>Email</label>
+                <div style={{ display: "flex", gap: 8 }}>
+                  <input
+                    className="input"
+                    placeholder="user@email.com"
+                    value={inviteEmail}
+                    onChange={(e) => setInviteEmail(e.target.value)}
+                    onKeyDown={(e) => e.key === "Enter" && handleInvite()}
+                    autoFocus
+                  />
+                </div>
+              </div>
+              {inviteError && <p style={{ color: "var(--danger)", fontSize: 13 }}>⚠️ {inviteError}</p>}
+            </div>
+            <div className="modal-footer">
+              <button className="btn btn-secondary" onClick={() => setShowInvite(false)}>Cancel</button>
+              <button className="btn btn-primary" onClick={handleInvite} disabled={inviteLoading}>
+                {inviteLoading ? "Inviting..." : "Invite"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Message Search */}
       {searchOpen && (
@@ -245,7 +311,6 @@ export default function ChatArea({ room, onToggleSidebar, onSearchOpen, searchOp
               className={`msg-group ${isOwn ? "own" : "other"}`}
               onContextMenu={(e) => !msg.unsent && handleContextMenu(e, msg)}
             >
-              {/* Reply preview */}
               {msg.replyTo && (
                 <div
                   className="reply-preview"
@@ -262,7 +327,6 @@ export default function ChatArea({ room, onToggleSidebar, onSearchOpen, searchOp
               )}
 
               <div style={{ display: "flex", alignItems: "flex-end", gap: 6, flexDirection: isOwn ? "row-reverse" : "row" }}>
-                {/* Avatar */}
                 {!isOwn && (
                   <div className="avatar avatar-sm">
                     {photo ? <img src={photo} alt="" /> : name[0]?.toUpperCase()}
@@ -315,7 +379,6 @@ export default function ChatArea({ room, onToggleSidebar, onSearchOpen, searchOp
 
       {/* Input Bar */}
       <div className="chat-input-bar">
-        {/* Reply preview */}
         {replyTo && (
           <div className="reply-preview">
             <div>
@@ -324,7 +387,6 @@ export default function ChatArea({ room, onToggleSidebar, onSearchOpen, searchOp
             <button className="icon-btn" style={{ width: 22, height: 22 }} onClick={() => setReplyTo(null)}>✕</button>
           </div>
         )}
-        {/* Edit indicator */}
         {editingId && (
           <div className="reply-preview">
             <span>✏️ Editing message</span>
