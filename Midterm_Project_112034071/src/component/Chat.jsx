@@ -1,13 +1,16 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import {
   collection, query, orderBy, onSnapshot,
-  addDoc, updateDoc, doc, serverTimestamp, getDoc, arrayUnion, getDocs, where,
+  addDoc, updateDoc, doc, serverTimestamp, getDoc, arrayUnion, arrayRemove, getDocs, where,
 } from "firebase/firestore";
 import { ref, uploadBytes, getDownloadURL } from "firebase/storage";
 import { db, storage } from "../firebase";
 import { useAuth } from "../context/Authentication";
 import { sanitize, formatTime } from "../helper";
 import MessageContextMenu from "./Message";
+
+// Available emojis for reactions
+const EMOJI_LIST = ["👍", "❤️", "😂", "😮", "😢", "🔥"];
 
 export default function ChatArea({ room, onToggleSidebar, onSearchOpen, searchOpen }) {
   const { user, userProfile } = useAuth();
@@ -16,6 +19,7 @@ export default function ChatArea({ room, onToggleSidebar, onSearchOpen, searchOp
   const [editingId, setEditingId] = useState(null);
   const [replyTo, setReplyTo] = useState(null);
   const [contextMenu, setContextMenu] = useState(null);
+  const [emojiPickerMsgId, setEmojiPickerMsgId] = useState(null);
   const [searchQuery, setSearchQuery] = useState("");
   const [searchResults, setSearchResults] = useState([]);
   const [memberProfiles, setMemberProfiles] = useState({});
@@ -24,12 +28,14 @@ export default function ChatArea({ room, onToggleSidebar, onSearchOpen, searchOp
   const [inviteEmail, setInviteEmail] = useState("");
   const [inviteError, setInviteError] = useState("");
   const [inviteLoading, setInviteLoading] = useState(false);
+  const [blockedUsers, setBlockedUsers] = useState([]); // uids I blocked
+  const [blockedByUsers, setBlockedByUsers] = useState([]); // uids who blocked me
   const bottomRef = useRef();
   const msgRefs = useRef({});
   const fileRef = useRef();
   const inputRef = useRef();
 
-  // Load member profiles — re-run whenever room.members changes
+  // Load member profiles
   useEffect(() => {
     if (!room) return;
     room.members.forEach(async (uid) => {
@@ -38,12 +44,33 @@ export default function ChatArea({ room, onToggleSidebar, onSearchOpen, searchOp
         setMemberProfiles((prev) => ({ ...prev, [uid]: snap.data() }));
       }
     });
-  }, [room?.members?.join(",")]); // re-run when member list changes
+  }, [room?.members?.join(",")]);
+
+  // Load my blocked list and who blocked me
+  useEffect(() => {
+    if (!user) return;
+    const unsub = onSnapshot(doc(db, "users", user.uid), (snap) => {
+      if (snap.exists()) setBlockedUsers(snap.data().blockedUsers || []);
+    });
+    return unsub;
+  }, [user]);
+
+  useEffect(() => {
+    if (!room || !user) return;
+    // Check if any room member has blocked me
+    const others = room.members.filter((m) => m !== user.uid);
+    Promise.all(others.map((uid) => getDoc(doc(db, "users", uid)))).then((snaps) => {
+      const blockers = snaps
+        .filter((s) => s.exists() && (s.data().blockedUsers || []).includes(user.uid))
+        .map((s) => s.id);
+      setBlockedByUsers(blockers);
+    });
+  }, [room?.id, room?.members?.join(",")]);
 
   // Subscribe to messages
   useEffect(() => {
     if (!room) return;
-    setMemberProfiles({}); // reset when switching rooms
+    setMemberProfiles({});
     const q = query(collection(db, "rooms", room.id, "messages"), orderBy("createdAt", "asc"));
     const unsub = onSnapshot(q, (snap) => {
       setMessages(snap.docs.map((d) => ({ id: d.id, ...d.data() })));
@@ -61,6 +88,20 @@ export default function ChatArea({ room, onToggleSidebar, onSearchOpen, searchOp
     );
   }, [searchQuery, messages]);
 
+  // Block / unblock a user
+  async function toggleBlock(targetUid) {
+    const isBlocked = blockedUsers.includes(targetUid);
+    await updateDoc(doc(db, "users", user.uid), {
+      blockedUsers: isBlocked ? arrayRemove(targetUid) : arrayUnion(targetUid),
+    });
+  }
+
+  // Check if messaging is blocked in DM
+  const isDMBlocked = !room?.isGroup && room?.members?.some((uid) => {
+    if (uid === user.uid) return false;
+    return blockedUsers.includes(uid) || blockedByUsers.includes(uid);
+  });
+
   function scrollToMessage(id) {
     const el = msgRefs.current[id];
     if (el) {
@@ -70,7 +111,6 @@ export default function ChatArea({ room, onToggleSidebar, onSearchOpen, searchOp
     }
   }
 
-  // Invite member to existing room
   async function handleInvite() {
     if (!inviteEmail.trim()) return;
     setInviteError("");
@@ -93,14 +133,12 @@ export default function ChatArea({ room, onToggleSidebar, onSearchOpen, searchOp
   }
 
   async function sendMessage() {
+    if (isDMBlocked) return;
     const text = sanitize(input.trim());
     if (!text && !editingId) return;
 
     if (editingId) {
-      await updateDoc(doc(db, "rooms", room.id, "messages", editingId), {
-        text,
-        edited: true,
-      });
+      await updateDoc(doc(db, "rooms", room.id, "messages", editingId), { text, edited: true });
       setEditingId(null);
       setInput("");
       return;
@@ -115,6 +153,7 @@ export default function ChatArea({ room, onToggleSidebar, onSearchOpen, searchOp
       unsent: false,
       edited: false,
       type: "text",
+      reactions: {},
       ...(replyTo ? { replyTo } : {}),
     };
 
@@ -143,6 +182,7 @@ export default function ChatArea({ room, onToggleSidebar, onSearchOpen, searchOp
         createdAt: serverTimestamp(),
         unsent: false,
         type: "image",
+        reactions: {},
       };
       await addDoc(collection(db, "rooms", room.id, "messages"), msgData);
       await updateDoc(doc(db, "rooms", room.id), {
@@ -161,6 +201,20 @@ export default function ChatArea({ room, onToggleSidebar, onSearchOpen, searchOp
       text: "This message was unsent.",
       imageUrl: null,
     });
+  }
+
+  // Add or remove emoji reaction
+  async function toggleReaction(msgId, emoji) {
+    const msgRef = doc(db, "rooms", room.id, "messages", msgId);
+    const msgSnap = await getDoc(msgRef);
+    if (!msgSnap.exists()) return;
+    const reactions = msgSnap.data().reactions || {};
+    const users = reactions[emoji] || [];
+    const hasReacted = users.includes(user.uid);
+    await updateDoc(msgRef, {
+      [`reactions.${emoji}`]: hasReacted ? arrayRemove(user.uid) : arrayUnion(user.uid),
+    });
+    setEmojiPickerMsgId(null);
   }
 
   function startEdit(msg) {
@@ -183,6 +237,7 @@ export default function ChatArea({ room, onToggleSidebar, onSearchOpen, searchOp
       setEditingId(null);
       setReplyTo(null);
       setInput("");
+      setEmojiPickerMsgId(null);
     }
   }
 
@@ -194,6 +249,12 @@ export default function ChatArea({ room, onToggleSidebar, onSearchOpen, searchOp
     (senderId) => memberProfiles[senderId]?.photoURL || "",
     [memberProfiles]
   );
+
+  // Should this message be hidden? (blocked user in group)
+  function isHidden(msg) {
+    if (!room?.isGroup) return false;
+    return blockedUsers.includes(msg.senderId) || blockedByUsers.includes(msg.senderId);
+  }
 
   if (!room) {
     return (
@@ -228,7 +289,6 @@ export default function ChatArea({ room, onToggleSidebar, onSearchOpen, searchOp
           </div>
         </div>
         <div style={{ display: "flex", gap: 4 }}>
-          {/* Invite button */}
           <button className="icon-btn" onClick={() => setShowInvite(true)} title="Invite member">➕</button>
           <button className="icon-btn" onClick={onSearchOpen} title="Search messages">🔍</button>
         </div>
@@ -245,16 +305,14 @@ export default function ChatArea({ room, onToggleSidebar, onSearchOpen, searchOp
             <div className="modal-body">
               <div className="form-group">
                 <label>Email</label>
-                <div style={{ display: "flex", gap: 8 }}>
-                  <input
-                    className="input"
-                    placeholder="user@email.com"
-                    value={inviteEmail}
-                    onChange={(e) => setInviteEmail(e.target.value)}
-                    onKeyDown={(e) => e.key === "Enter" && handleInvite()}
-                    autoFocus
-                  />
-                </div>
+                <input
+                  className="input"
+                  placeholder="user@email.com"
+                  value={inviteEmail}
+                  onChange={(e) => setInviteEmail(e.target.value)}
+                  onKeyDown={(e) => e.key === "Enter" && handleInvite()}
+                  autoFocus
+                />
               </div>
               {inviteError && <p style={{ color: "var(--danger)", fontSize: 13 }}>⚠️ {inviteError}</p>}
             </div>
@@ -285,10 +343,7 @@ export default function ChatArea({ room, onToggleSidebar, onSearchOpen, searchOp
                 <div key={m.id} className="search-result-item" onClick={() => scrollToMessage(m.id)}>
                   <span style={{ fontSize: 11, color: "var(--text-muted)" }}>{senderName(m.senderId)}</span>
                   <span dangerouslySetInnerHTML={{
-                    __html: m.text.replace(
-                      new RegExp(searchQuery, "gi"),
-                      (match) => `<mark>${match}</mark>`
-                    )
+                    __html: m.text.replace(new RegExp(searchQuery, "gi"), (match) => `<mark>${match}</mark>`)
                   }} />
                 </div>
               ))}
@@ -297,12 +352,26 @@ export default function ChatArea({ room, onToggleSidebar, onSearchOpen, searchOp
         </div>
       )}
 
+      {/* DM blocked warning */}
+      {isDMBlocked && (
+        <div style={{
+          background: "#fff3cd", borderTop: "1px solid #ffc107",
+          padding: "10px 20px", fontSize: 13, color: "#856404", textAlign: "center"
+        }}>
+          ⚠️ You can no longer send messages in this conversation.
+        </div>
+      )}
+
       {/* Messages */}
-      <div className="chat-messages">
+      <div className="chat-messages" onClick={() => setEmojiPickerMsgId(null)}>
         {messages.map((msg) => {
+          if (isHidden(msg)) return null;
+
           const isOwn = msg.senderId === user.uid;
           const name = senderName(msg.senderId);
           const photo = senderPhoto(msg.senderId);
+          const reactions = msg.reactions || {};
+          const hasReactions = Object.entries(reactions).some(([, users]) => users.length > 0);
 
           return (
             <div
@@ -311,31 +380,40 @@ export default function ChatArea({ room, onToggleSidebar, onSearchOpen, searchOp
               className={`msg-group ${isOwn ? "own" : "other"}`}
               onContextMenu={(e) => !msg.unsent && handleContextMenu(e, msg)}
             >
-              {msg.replyTo && (
-                <div
-                  className="reply-preview"
-                  style={{ cursor: "pointer", marginBottom: 2, maxWidth: "100%" }}
-                  onClick={() => scrollToMessage(msg.replyTo.id)}
-                >
-                  <div>
-                    <div style={{ fontWeight: 700, fontSize: 11 }}>{msg.replyTo.senderName}</div>
-                    <div style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 240 }}>
-                      {msg.replyTo.text || "📷 Image"}
-                    </div>
-                  </div>
-                </div>
-              )}
-
-              <div style={{ display: "flex", alignItems: "flex-end", gap: 6, flexDirection: isOwn ? "row-reverse" : "row" }}>
+              <div style={{
+                display: "flex",
+                alignItems: "flex-end",
+                gap: 6,
+                flexDirection: isOwn ? "row-reverse" : "row"
+              }}>
+                {/* Avatar */}
                 {!isOwn && (
-                  <div className="avatar avatar-sm">
+                  <div className="avatar avatar-sm" style={{ flexShrink: 0 }}>
                     {photo ? <img src={photo} alt="" /> : name[0]?.toUpperCase()}
                   </div>
                 )}
 
-                <div>
+                {/* Message content column */}
+                <div style={{ display: "flex", flexDirection: "column", alignItems: isOwn ? "flex-end" : "flex-start", maxWidth: "100%" }}>
                   {!isOwn && <div className="msg-sender">{name}</div>}
 
+                  {/* Reply preview — inside the content column, aligned correctly */}
+                  {msg.replyTo && (
+                    <div
+                      className="reply-preview"
+                      style={{ cursor: "pointer", marginBottom: 3, alignSelf: "stretch" }}
+                      onClick={() => scrollToMessage(msg.replyTo.id)}
+                    >
+                      <div>
+                        <div style={{ fontWeight: 700, fontSize: 11 }}>{msg.replyTo.senderName}</div>
+                        <div style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 220 }}>
+                          {msg.replyTo.text || "📷 Image"}
+                        </div>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Bubble or image */}
                   {msg.type === "image" && !msg.unsent ? (
                     <img
                       className="msg-img animate-fadeIn"
@@ -344,10 +422,87 @@ export default function ChatArea({ room, onToggleSidebar, onSearchOpen, searchOp
                       onClick={() => window.open(msg.imageUrl, "_blank")}
                     />
                   ) : (
-                    <div
-                      className={`msg-bubble ${msg.unsent ? "unsent" : ""} ${msg.edited && !msg.unsent ? "edited" : ""} ${highlightedId === msg.id ? "highlight" : ""}`}
-                    >
+                    <div className={`msg-bubble ${msg.unsent ? "unsent" : ""} ${msg.edited && !msg.unsent ? "edited" : ""} ${highlightedId === msg.id ? "highlight" : ""}`}>
                       {msg.text}
+                    </div>
+                  )}
+
+                  {/* Reactions display */}
+                  {hasReactions && (
+                    <div style={{ display: "flex", flexWrap: "wrap", gap: 3, marginTop: 3 }}>
+                      {Object.entries(reactions).map(([emoji, users]) =>
+                        users.length > 0 ? (
+                          <button
+                            key={emoji}
+                            onClick={() => toggleReaction(msg.id, emoji)}
+                            style={{
+                              background: users.includes(user.uid) ? "var(--primary-light)" : "var(--surface2)",
+                              border: users.includes(user.uid) ? "1.5px solid var(--primary)" : "1.5px solid var(--border)",
+                              borderRadius: 99,
+                              padding: "1px 7px",
+                              fontSize: 12,
+                              cursor: "pointer",
+                              display: "flex",
+                              alignItems: "center",
+                              gap: 3,
+                            }}
+                          >
+                            {emoji} <span style={{ fontSize: 11, color: "var(--text-muted)" }}>{users.length}</span>
+                          </button>
+                        ) : null
+                      )}
+                    </div>
+                  )}
+
+                  {/* Emoji picker trigger */}
+                  {!msg.unsent && (
+                    <div style={{ position: "relative" }}>
+                      <button
+                        className="icon-btn"
+                        style={{ width: 20, height: 20, fontSize: 12, opacity: 0.5 }}
+                        onClick={(e) => { e.stopPropagation(); setEmojiPickerMsgId(emojiPickerMsgId === msg.id ? null : msg.id); }}
+                      >
+                        😊
+                      </button>
+                      {emojiPickerMsgId === msg.id && (
+                        <div
+                          onClick={(e) => e.stopPropagation()}
+                          style={{
+                            position: "absolute",
+                            [isOwn ? "right" : "left"]: 0,
+                            bottom: 24,
+                            background: "var(--surface)",
+                            border: "1px solid var(--border)",
+                            borderRadius: "var(--radius-sm)",
+                            boxShadow: "var(--shadow)",
+                            display: "flex",
+                            gap: 4,
+                            padding: 6,
+                            zIndex: 200,
+                            animation: "scaleIn 0.15s ease both",
+                          }}
+                        >
+                          {EMOJI_LIST.map((emoji) => (
+                            <button
+                              key={emoji}
+                              onClick={() => toggleReaction(msg.id, emoji)}
+                              style={{
+                                background: "none",
+                                border: "none",
+                                fontSize: 20,
+                                cursor: "pointer",
+                                padding: "2px 4px",
+                                borderRadius: 4,
+                                transition: "transform 0.1s",
+                              }}
+                              onMouseEnter={(e) => e.target.style.transform = "scale(1.3)"}
+                              onMouseLeave={(e) => e.target.style.transform = "scale(1)"}
+                            >
+                              {emoji}
+                            </button>
+                          ))}
+                        </div>
+                      )}
                     </div>
                   )}
 
@@ -366,6 +521,7 @@ export default function ChatArea({ room, onToggleSidebar, onSearchOpen, searchOp
           x={contextMenu.x}
           y={contextMenu.y}
           isOwn={contextMenu.msg.senderId === user.uid}
+          isBlocked={blockedUsers.includes(contextMenu.msg.senderId)}
           onUnsend={() => unsendMessage(contextMenu.msg.id)}
           onEdit={() => startEdit(contextMenu.msg)}
           onReply={() => setReplyTo({
@@ -373,6 +529,7 @@ export default function ChatArea({ room, onToggleSidebar, onSearchOpen, searchOp
             text: contextMenu.msg.text,
             senderName: senderName(contextMenu.msg.senderId),
           })}
+          onBlock={() => toggleBlock(contextMenu.msg.senderId)}
           onClose={() => setContextMenu(null)}
         />
       )}
@@ -400,13 +557,14 @@ export default function ChatArea({ room, onToggleSidebar, onSearchOpen, searchOp
           <textarea
             ref={inputRef}
             className="msg-input"
-            placeholder={editingId ? "Edit your message..." : "Type a message... (Enter to send)"}
+            placeholder={isDMBlocked ? "You cannot send messages here." : editingId ? "Edit your message..." : "Type a message... (Enter to send)"}
             rows={1}
             value={input}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={handleKeyDown}
+            disabled={isDMBlocked}
           />
-          <button className="send-btn" onClick={sendMessage} disabled={!input.trim() && !editingId}>
+          <button className="send-btn" onClick={sendMessage} disabled={!input.trim() || isDMBlocked}>
             ➤
           </button>
         </div>

@@ -41,7 +41,7 @@ export default function NewRoomModal({ onClose, existingRoom }) {
         members: allMembers,
         createdBy: user.uid,
         createdAt: serverTimestamp(),
-        isGroup: allMembers.length > 2,
+        isGroup: allMembers.length > 1,
         lastMessage: "",
         lastMessageAt: serverTimestamp(),
       });
