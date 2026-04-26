@@ -11,6 +11,7 @@ export default function ProfileModal({ onClose }) {
     username: userProfile?.username || "",
     phone: userProfile?.phone || "",
     address: userProfile?.address || "",
+    displayEmail: userProfile?.displayEmail || "",
   });
   const [uploading, setUploading] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -68,11 +69,16 @@ export default function ProfileModal({ onClose }) {
             </span>
           </div>
 
-          {/* Email (read-only) */}
-          <div className="form-group">
-            <label>Email</label>
-            <input className="input" value={user?.email || ""} readOnly style={{ background: "var(--bg)", color: "var(--text-muted)" }} />
-          </div>
+          {/* Email (display only, not real auth email) */}
+        <div className="form-group">
+            <label>Email (display only)</label>
+            <input
+                className="input"
+                value={form.displayEmail ?? userProfile?.displayEmail ?? user?.email ?? ""}
+                onChange={(e) => setForm({ ...form, displayEmail: e.target.value })}
+                placeholder="Display email"
+            />
+        </div>
 
           {/* Username */}
           <div className="form-group">

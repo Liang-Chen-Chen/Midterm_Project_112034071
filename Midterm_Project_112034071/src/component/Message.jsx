@@ -1,6 +1,6 @@
 import { useEffect, useRef } from "react";
 
-export default function MessageContextMenu({ x, y, isOwn, onUnsend, onEdit, onReply, onClose }) {
+export default function MessageContextMenu({ x, y, isOwn, isBlocked, onUnsend, onEdit, onReply, onBlock, onClose }) {
   const ref = useRef();
 
   useEffect(() => {
@@ -11,10 +11,9 @@ export default function MessageContextMenu({ x, y, isOwn, onUnsend, onEdit, onRe
     return () => document.removeEventListener("mousedown", handleClick);
   }, [onClose]);
 
-  // Adjust position so menu doesn't go off-screen
   const style = {
-    top: Math.min(y, window.innerHeight - 160),
-    left: Math.min(x, window.innerWidth - 160),
+    top: Math.min(y, window.innerHeight - 200),
+    left: Math.min(x, window.innerWidth - 180),
   };
 
   return (
@@ -22,7 +21,7 @@ export default function MessageContextMenu({ x, y, isOwn, onUnsend, onEdit, onRe
       <div className="context-menu-item" onClick={() => { onReply(); onClose(); }}>
         ↩️ Reply
       </div>
-      {isOwn && (
+      {isOwn ? (
         <>
           <div className="context-menu-item" onClick={() => { onEdit(); onClose(); }}>
             ✏️ Edit
@@ -31,6 +30,13 @@ export default function MessageContextMenu({ x, y, isOwn, onUnsend, onEdit, onRe
             🗑️ Unsend
           </div>
         </>
+      ) : (
+        <div
+          className="context-menu-item danger"
+          onClick={() => { onBlock(); onClose(); }}
+        >
+          {isBlocked ? "✅ Unblock User" : "🚫 Block User"}
+        </div>
       )}
     </div>
   );

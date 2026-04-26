@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { collection, addDoc, getDocs, query, where, serverTimestamp } from "firebase/firestore";
+import { getDoc, doc, updateDoc, arrayRemove } from "firebase/firestore";
 import { db } from "../firebase";
 import { useAuth } from "../context/Authentication";
 
@@ -24,6 +25,17 @@ export default function NewRoomModal({ onClose, existingRoom }) {
       return;
     }
     const found = snap.docs[0].data();
+        // 如果我已封鎖此人，提示是否解除
+        const mySnap = await getDoc(doc(db, "users", user.uid));
+        const myBlocked = mySnap.data()?.blockedUsers || [];
+        if (myBlocked.includes(found.uid)) {
+        if (window.confirm(`You have blocked ${found.username || found.email}. Unblock them?`)) {
+            await updateDoc(doc(db, "users", user.uid), {
+            blockedUsers: arrayRemove(found.uid),
+            });
+        }
+        return;
+    }
     if (found.uid === user.uid) { setError("That's you!"); return; }
     if (members.includes(found.uid)) { setError("Already added."); return; }
     setMembers((prev) => [...prev, found.uid]);
@@ -41,7 +53,7 @@ export default function NewRoomModal({ onClose, existingRoom }) {
         members: allMembers,
         createdBy: user.uid,
         createdAt: serverTimestamp(),
-        isGroup: allMembers.length > 1,
+        isGroup: allMembers.length > 2,
         lastMessage: "",
         lastMessageAt: serverTimestamp(),
       });

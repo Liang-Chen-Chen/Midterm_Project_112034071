@@ -30,6 +30,7 @@ export default function ChatArea({ room, onToggleSidebar, onSearchOpen, searchOp
   const [inviteLoading, setInviteLoading] = useState(false);
   const [blockedUsers, setBlockedUsers] = useState([]); // uids I blocked
   const [blockedByUsers, setBlockedByUsers] = useState([]); // uids who blocked me
+  const [selectedRoom, setSelectedRoom] = useState(null);
   const bottomRef = useRef();
   const msgRefs = useRef({});
   const fileRef = useRef();
@@ -50,34 +51,64 @@ export default function ChatArea({ room, onToggleSidebar, onSearchOpen, searchOp
   useEffect(() => {
     if (!user) return;
     const unsub = onSnapshot(doc(db, "users", user.uid), (snap) => {
-      if (snap.exists()) setBlockedUsers(snap.data().blockedUsers || []);
+      if (snap.exists()) {
+        console.log("My blockedUsers:", snap.data().blockedUsers);
+        setBlockedUsers(snap.data().blockedUsers || []);
+      }
     });
     return unsub;
   }, [user]);
 
   useEffect(() => {
-    if (!room || !user) return;
-    // Check if any room member has blocked me
-    const others = room.members.filter((m) => m !== user.uid);
-    Promise.all(others.map((uid) => getDoc(doc(db, "users", uid)))).then((snaps) => {
-      const blockers = snaps
-        .filter((s) => s.exists() && (s.data().blockedUsers || []).includes(user.uid))
-        .map((s) => s.id);
-      setBlockedByUsers(blockers);
-    });
-  }, [room?.id, room?.members?.join(",")]);
+    if (!user) return;
+
+    // Watch ALL users in the current room (not just DM partner)
+    const others = (room?.members || []).filter((m) => m !== user.uid);
+    console.log("Watching others:", others);
+    if (others.length === 0) {
+        setBlockedByUsers([]);
+        return;
+    }
+
+    // Reset on room change to avoid stale entries from previous room
+    setBlockedByUsers([]);
+
+    const unsubscribers = others.map((uid) =>
+        onSnapshot(doc(db, "users", uid), (snap) => {
+        if (!snap.exists()) return;
+        console.log(`User ${uid} blockedUsers:`, snap.data()?.blockedUsers);
+        const blocked = (snap.data().blockedUsers || []).includes(user.uid);
+        console.log(`Does ${uid} block me (${user.uid})?`, blocked);
+        setBlockedByUsers((prev) => {
+            const next = new Set(prev);
+            if (blocked) next.add(uid);
+            else next.delete(uid);
+            return [...next];
+        });
+        })
+    );
+
+    return () => unsubscribers.forEach((u) => u());
+    }, [room?.id, room?.members?.join(","), user]);   // room?.id ensures reset when switching rooms
+
 
   // Subscribe to messages
   useEffect(() => {
     if (!room) return;
-    setMemberProfiles({});
+    //setMemberProfiles({});
+    let isFirst = true;
     const q = query(collection(db, "rooms", room.id, "messages"), orderBy("createdAt", "asc"));
     const unsub = onSnapshot(q, (snap) => {
-      setMessages(snap.docs.map((d) => ({ id: d.id, ...d.data() })));
-      setTimeout(() => bottomRef.current?.scrollIntoView({ behavior: "smooth" }), 50);
+        const newMsgs = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+        const hadNewMsg = snap.docChanges().some((c) => c.type === "added");
+        setMessages(newMsgs);
+        if (isFirst || hadNewMsg) {
+        setTimeout(() => bottomRef.current?.scrollIntoView({ behavior: "smooth" }), 50);
+        isFirst = false;
+        }
     });
     return unsub;
-  }, [room?.id]);
+    }, [room?.id]);
 
   // Message search
   useEffect(() => {
@@ -97,10 +128,26 @@ export default function ChatArea({ room, onToggleSidebar, onSearchOpen, searchOp
   }
 
   // Check if messaging is blocked in DM
-  const isDMBlocked = !room?.isGroup && room?.members?.some((uid) => {
-    if (uid === user.uid) return false;
-    return blockedUsers.includes(uid) || blockedByUsers.includes(uid);
-  });
+const otherUserId = room?.members?.find((uid) => uid !== user?.uid);
+
+const isDM = (room?.members?.length === 2);
+
+const isDMBlocked =
+  isDM &&
+  (
+    (otherUserId && blockedUsers.includes(otherUserId)) ||
+    blockedByUsers.length > 0
+  );
+
+  console.log("DEBUG:", {
+  isGroup: room?.isGroup,
+  members: room?.members,
+  otherUserId,
+  blockedUsers,
+  blockedByUsers,
+  isDMBlocked,
+});
+
 
   function scrollToMessage(id) {
     const el = msgRefs.current[id];
@@ -353,14 +400,17 @@ export default function ChatArea({ room, onToggleSidebar, onSearchOpen, searchOp
       )}
 
       {/* DM blocked warning */}
-      {isDMBlocked && (
+      {/* DM blocked warning */}
+    {isDMBlocked && (
         <div style={{
-          background: "#fff3cd", borderTop: "1px solid #ffc107",
-          padding: "10px 20px", fontSize: 13, color: "#856404", textAlign: "center"
+            background: "#fff3cd", borderTop: "1px solid #ffc107",
+            padding: "10px 20px", fontSize: 13, color: "#856404", textAlign: "center"
         }}>
-          ⚠️ You can no longer send messages in this conversation.
+            {blockedUsers.includes(otherUserId)
+            ? "⚠️ You have blocked this user. Unblock them to send messages."
+            : "⚠️ You can no longer send messages in this conversation."}
         </div>
-      )}
+    )}
 
       {/* Messages */}
       <div className="chat-messages" onClick={() => setEmojiPickerMsgId(null)}>
