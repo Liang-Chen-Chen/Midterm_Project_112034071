@@ -23,7 +23,7 @@ function AppInner() {
     if (!user) return;
     if ("Notification" in window && Notification.permission === "default") {
       Notification.requestPermission().then((perm) => {
-        if (perm === "granted") showToast("🔔 Notifications enabled!");
+        if (perm === "granted") showToast(" Notifications enabled!");
       });
     }
   }, [user]);
@@ -76,9 +76,11 @@ function AppInner() {
           const data = change.doc.data();
           if (data.senderId === user.uid) return;
           if (data.unsent) return;
-          if (room.id === activeRoomId) return; // don't notify for active room
-          const ts = data.createdAt?.toMillis?.() || 0;
-          if (ts < Date.now() - 10000) return; // ignore old messages on load
+          if (room.id === activeRoomId) return;
+          if (change.doc.metadata.hasPendingWrites) return; 
+
+          const ts = data.createdAt?.toMillis?.() ?? Date.now();
+          if (ts < Date.now() - 15000) return; 
 
           if (Notification.permission === "granted") {
             new Notification(`💬 ${room.name}`, {

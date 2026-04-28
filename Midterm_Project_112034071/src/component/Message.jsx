@@ -1,4 +1,5 @@
 import { useEffect, useRef } from "react";
+import { Trash2, Edit2, Reply, UserX, UserCheck } from "lucide-react";
 
 export default function MessageContextMenu({ x, y, isOwn, isBlocked, onUnsend, onEdit, onReply, onBlock, onClose }) {
   const ref = useRef();
@@ -19,15 +20,15 @@ export default function MessageContextMenu({ x, y, isOwn, isBlocked, onUnsend, o
   return (
     <div className="context-menu" ref={ref} style={style}>
       <div className="context-menu-item" onClick={() => { onReply(); onClose(); }}>
-        ↩️ Reply
+        <Reply size={16} /> Reply
       </div>
       {isOwn ? (
         <>
           <div className="context-menu-item" onClick={() => { onEdit(); onClose(); }}>
-            ✏️ Edit
+            <Edit2 size={16} /> Edit 
           </div>
           <div className="context-menu-item danger" onClick={() => { onUnsend(); onClose(); }}>
-            🗑️ Unsend
+            <Trash2 size={15} /> Unsend
           </div>
         </>
       ) : (
@@ -35,7 +36,7 @@ export default function MessageContextMenu({ x, y, isOwn, isBlocked, onUnsend, o
           className="context-menu-item danger"
           onClick={() => { onBlock(); onClose(); }}
         >
-          {isBlocked ? "✅ Unblock User" : "🚫 Block User"}
+          {isBlocked ? <UserCheck size={15} /> : <UserX size={15} />} {isBlocked ? " Unblock User" : " Block User"}
         </div>
       )}
     </div>

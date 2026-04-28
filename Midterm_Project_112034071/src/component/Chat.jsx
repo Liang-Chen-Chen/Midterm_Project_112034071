@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from "react";
+import { Paperclip, Smile, Send, Search, UserPlus, X } from "lucide-react";
 import {
   collection, query, orderBy, onSnapshot,
   addDoc, updateDoc, doc, serverTimestamp, getDoc, arrayUnion, arrayRemove, getDocs, where,
@@ -214,6 +215,7 @@ const isDMBlocked =
   }
 
   async function handleImageUpload(e) {
+    if (isDMBlocked) return;
     const file = e.target.files[0];
     if (!file) return;
     try {
@@ -336,8 +338,8 @@ const isDMBlocked =
           </div>
         </div>
         <div style={{ display: "flex", gap: 4 }}>
-          <button className="icon-btn" onClick={() => setShowInvite(true)} title="Invite member">➕</button>
-          <button className="icon-btn" onClick={onSearchOpen} title="Search messages">🔍</button>
+          <button className="icon-btn" onClick={() => setShowInvite(true)} title="Invite member"><UserPlus size={16} /></button>
+          <button className="icon-btn" onClick={onSearchOpen} title="Search messages"><Search size={16} /></button>
         </div>
       </div>
 
@@ -347,7 +349,7 @@ const isDMBlocked =
           <div className="modal animate-scaleIn">
             <div className="modal-header">
               <h2>Invite Member</h2>
-              <button className="icon-btn" onClick={() => setShowInvite(false)}>✕</button>
+              <button className="icon-btn" onClick={() => setShowInvite(false)}><X size={15} /></button>
             </div>
             <div className="modal-body">
               <div className="form-group">
@@ -402,15 +404,31 @@ const isDMBlocked =
       {/* DM blocked warning */}
       {/* DM blocked warning */}
     {isDMBlocked && (
-        <div style={{
-            background: "#fff3cd", borderTop: "1px solid #ffc107",
-            padding: "10px 20px", fontSize: 13, color: "#856404", textAlign: "center"
-        }}>
-            {blockedUsers.includes(otherUserId)
-            ? "⚠️ You have blocked this user. Unblock them to send messages."
-            : "⚠️ You can no longer send messages in this conversation."}
-        </div>
+  <div className="blocked-banner" style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 12 }}>
+    {blockedUsers.includes(otherUserId) ? (
+      <>
+        <span>You have blocked this user.</span>
+        <button
+          onClick={() => toggleBlock(otherUserId)}
+          style={{
+            background: "var(--primary)",
+            color: "#fff",
+            border: "none",
+            borderRadius: "var(--radius-xs)",
+            padding: "4px 12px",
+            fontSize: 12,
+            fontWeight: 600,
+            cursor: "pointer",
+          }}
+        >
+          Unblock
+        </button>
+      </>
+    ) : (
+      <span>You can no longer send messages in this conversation.</span>
     )}
+  </div>
+)}
 
       {/* Messages */}
       <div className="chat-messages" onClick={() => setEmojiPickerMsgId(null)}>
@@ -512,7 +530,7 @@ const isDMBlocked =
                         style={{ width: 20, height: 20, fontSize: 12, opacity: 0.5 }}
                         onClick={(e) => { e.stopPropagation(); setEmojiPickerMsgId(emojiPickerMsgId === msg.id ? null : msg.id); }}
                       >
-                        😊
+                        <Smile size={15} />
                       </button>
                       {emojiPickerMsgId === msg.id && (
                         <div
@@ -603,7 +621,7 @@ const isDMBlocked =
 
         <div className="input-row">
           <input type="file" ref={fileRef} accept="image/*" style={{ display: "none" }} onChange={handleImageUpload} />
-          <button className="icon-btn" onClick={() => fileRef.current.click()} title="Send image">📎</button>
+          <button className="icon-btn" onClick={() => fileRef.current.click()} title="Send image" disabled={isDMBlocked}  ><Paperclip size={17} /></button>
           <textarea
             ref={inputRef}
             className="msg-input"
@@ -615,7 +633,7 @@ const isDMBlocked =
             disabled={isDMBlocked}
           />
           <button className="send-btn" onClick={sendMessage} disabled={!input.trim() || isDMBlocked}>
-            ➤
+            <Send size={14} />
           </button>
         </div>
       </div>

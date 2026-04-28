@@ -6,6 +6,7 @@ import { useAuth } from "../context/Authentication";
 import { formatTime } from "../helper";
 import NewRoomModal from "./Roomlist";
 import ProfileModal from "./Profile";
+import { LogOut, Edit, Search, Trash2, MessageCircle } from "lucide-react";
 
 export default function Sidebar({ activeRoom, onSelectRoom, onClose, rooms = [], unreadCounts = {} }) {
   const { user, userProfile } = useAuth();
@@ -32,16 +33,16 @@ export default function Sidebar({ activeRoom, onSelectRoom, onClose, rooms = [],
   return (
     <>
       <div className="sidebar-header">
-        <span>💬 Chatroom</span>
+        <span><MessageCircle size={16}/> Chatroom</span>
         <button className="icon-btn" onClick={() => setShowNewRoom(true)} title="New room" style={{ color: "var(--primary)" }}>
-          ✏️
+          <Edit size={16} />
         </button>
       </div>
 
       <div className="search-bar">
         <input
           className="input"
-          placeholder="🔍  Search rooms..."
+          placeholder=" Search rooms..."
           value={search}
           onChange={(e) => setSearch(e.target.value)}
           style={{ fontSize: 13 }}
@@ -89,7 +90,7 @@ export default function Sidebar({ activeRoom, onSelectRoom, onClose, rooms = [],
                   onClick={(e) => leaveRoom(e, room)}
                   title="Leave room"
                 >
-                  🗑️
+                  <Trash2 size={15} />
                 </button>
               ) : unread > 0 ? (
                 <div className="unread-badge">{unread > 99 ? "99+" : unread}</div>
@@ -115,7 +116,7 @@ export default function Sidebar({ activeRoom, onSelectRoom, onClose, rooms = [],
           </div>
           <div style={{ fontSize: 11, color: "var(--text-muted)" }}>{user?.email}</div>
         </div>
-        <button className="icon-btn" onClick={() => signOut(auth)} title="Sign out">🚪</button>
+        <button className="icon-btn" onClick={() => signOut(auth)} title="Sign out"><LogOut size={16} /></button>
       </div>
 
       {showNewRoom && <NewRoomModal onClose={() => setShowNewRoom(false)} />}
