@@ -7,84 +7,58 @@ import Sidebar from "./component/Sidebar";
 import ChatArea from "./component/Chat";
 import "./App.css";
 
-function AppInner() {
-  const { user } = useAuth();
-  const [activeRoom, setActiveRoom] = useState(null);
-  const [activeRoomId, setActiveRoomId] = useState(null); // separate ID to avoid stale closure
-  const [sidebarOpen, setSidebarOpen] = useState(false);
-  const [searchOpen, setSearchOpen] = useState(false);
-  const [toast, setToast] = useState(null);
-  const [unreadCounts, setUnreadCounts] = useState({}); // { roomId: count }
+// ─── Custom hook: manages all room subscriptions, unread badges, and notifications ───
+function useRoomManager(user, currentRoomId) {
   const [rooms, setRooms] = useState([]);
-  const lastSeenRef = useRef({}); // { roomId: timestamp } — when user last viewed the room
+  const [badges, setBadges] = useState({});       // { roomId: unreadCount }
+  const viewedAt = useRef({});                     // { roomId: timestamp }
 
-  // Request Chrome notification permission on first login
-  useEffect(() => {
-    if (!user) return;
-    if ("Notification" in window && Notification.permission === "default") {
-      Notification.requestPermission().then((perm) => {
-        if (perm === "granted") showToast(" Notifications enabled!");
-      });
-    }
-  }, [user]);
-
-  // Subscribe to user's rooms
+  // Subscribe to rooms the user belongs to
   useEffect(() => {
     if (!user) return;
     const q = query(collection(db, "rooms"), where("members", "array-contains", user.uid));
-    const unsub = onSnapshot(q, (snap) => {
-      const updated = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
-      setRooms(updated);
-      // Sync activeRoom if it got updated (e.g. new member invited)
-      setActiveRoom((prev) => {
-        if (!prev) return prev;
-        const refreshed = updated.find((r) => r.id === prev.id);
-        return refreshed || prev;
-      });
+    return onSnapshot(q, (snap) => {
+      const fetched = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+      setRooms(fetched);
     });
-    return unsub;
   }, [user]);
 
-  // Track unread messages per room
+  // Per-room message listener → unread count + desktop notifications
   useEffect(() => {
     if (!user || rooms.length === 0) return;
 
-    const unsubscribers = rooms.map((room) => {
-      const q = query(
+    const teardowns = rooms.map((room) => {
+      const msgQuery = query(
         collection(db, "rooms", room.id, "messages"),
         orderBy("createdAt", "desc"),
         limit(50)
       );
 
-      return onSnapshot(q, (snap) => {
-        const lastSeen = lastSeenRef.current[room.id] || 0;
+      return onSnapshot(msgQuery, (snap) => {
+        const lastViewed = viewedAt.current[room.id] ?? 0;
 
-        // Count messages after lastSeen that aren't from me and aren't unsent
         const unread = snap.docs.filter((d) => {
-          const data = d.data();
-          if (data.senderId === user.uid) return false;
-          if (data.unsent) return false;
-          const ts = data.createdAt?.toMillis?.() || 0;
-          return ts > lastSeen;
+          const { senderId, unsent, createdAt } = d.data();
+          if (senderId === user.uid || unsent) return false;
+          return (createdAt?.toMillis?.() ?? 0) > lastViewed;
         });
 
-        setUnreadCounts((prev) => ({ ...prev, [room.id]: unread.length }));
+        setBadges((prev) => ({ ...prev, [room.id]: unread.length }));
 
-        // Chrome notification for new messages in non-active rooms
+        // Fire desktop notification for messages in other rooms
         snap.docChanges().forEach((change) => {
           if (change.type !== "added") return;
-          const data = change.doc.data();
-          if (data.senderId === user.uid) return;
-          if (data.unsent) return;
-          if (room.id === activeRoomId) return;
-          if (change.doc.metadata.hasPendingWrites) return; 
+          const { senderId, unsent, createdAt, text } = change.doc.data();
+          if (senderId === user.uid || unsent) return;
+          if (room.id === currentRoomId) return;
+          if (change.doc.metadata.hasPendingWrites) return;
 
-          const ts = data.createdAt?.toMillis?.() ?? Date.now();
-          if (ts < Date.now() - 15000) return; 
+          const messageAge = Date.now() - (createdAt?.toMillis?.() ?? Date.now());
+          if (messageAge > 15000) return;
 
           if (Notification.permission === "granted") {
             new Notification(`💬 ${room.name}`, {
-              body: data.text || "📷 Image",
+              body: text || "📷 Image",
               icon: "/favicon.svg",
             });
           }
@@ -92,54 +66,106 @@ function AppInner() {
       });
     });
 
-    return () => unsubscribers.forEach((u) => u());
-  }, [user, rooms, activeRoomId]);
+    return () => teardowns.forEach((fn) => fn());
+  }, [user, rooms, currentRoomId]);
 
-  function handleSelectRoom(room) {
-    if (!room) {
-      setActiveRoom(null);
-      setActiveRoomId(null);
-      return;
-    }
-    setActiveRoom(room);
-    setActiveRoomId(room.id);
-    setSearchOpen(false);
-    // Mark as read: record current timestamp
-    lastSeenRef.current[room.id] = Date.now() + 1000;
-    setUnreadCounts((prev) => ({ ...prev, [room.id]: 0 }));
+  function markRead(roomId) {
+    viewedAt.current[roomId] = Date.now() + 1000;
+    setBadges((prev) => ({ ...prev, [roomId]: 0 }));
   }
 
-  function showToast(msg, duration = 3000) {
-    setToast(msg);
-    setTimeout(() => setToast(null), duration);
+  // Keep activeRoom data fresh when Firestore updates it
+  function syncRoom(prev, updated) {
+    if (!prev) return prev;
+    return updated.find((r) => r.id === prev.id) ?? prev;
+  }
+
+  return { rooms, badges, markRead, syncRoom };
+}
+
+// ─── Custom hook: notification permission request on login ───
+function useNotificationPermission(user, onGranted) {
+  useEffect(() => {
+    if (!user) return;
+    if ("Notification" in window && Notification.permission === "default") {
+      Notification.requestPermission().then((perm) => {
+        if (perm === "granted") onGranted();
+      });
+    }
+  }, [user]);
+}
+
+// ─── Custom hook: ephemeral toast messages ───
+function useToast() {
+  const [message, setMessage] = useState(null);
+
+  function push(text, ms = 3000) {
+    setMessage(text);
+    setTimeout(() => setMessage(null), ms);
+  }
+
+  return { message, push };
+}
+
+// ─────────────────────────────────────────────────────────────
+function AppInner() {
+  const { user } = useAuth();
+
+  const [currentRoom, setCurrentRoom] = useState(null);
+  const [currentRoomId, setCurrentRoomId] = useState(null);
+  const [drawerOpen, setDrawerOpen] = useState(false);
+  const [searchOpen, setSearchOpen] = useState(false);
+
+  const toast = useToast();
+  const { rooms, badges, markRead, syncRoom } = useRoomManager(user, currentRoomId);
+
+  useNotificationPermission(user, () => toast.push("Notifications enabled!"));
+
+  // Keep currentRoom in sync with live Firestore data
+  useEffect(() => {
+    setCurrentRoom((prev) => syncRoom(prev, rooms));
+  }, [rooms]);
+
+  function openRoom(room) {
+    if (!room) {
+      setCurrentRoom(null);
+      setCurrentRoomId(null);
+      return;
+    }
+    setCurrentRoom(room);
+    setCurrentRoomId(room.id);
+    setSearchOpen(false);
+    markRead(room.id);
   }
 
   if (!user) return <AuthPage />;
 
   return (
     <div className="app-layout">
-      {sidebarOpen && (
-        <div className="sidebar-backdrop" onClick={() => setSidebarOpen(false)} />
+      {drawerOpen && (
+        <div className="sidebar-backdrop" onClick={() => setDrawerOpen(false)} />
       )}
 
-      <div className={`sidebar ${sidebarOpen ? "open" : ""}`}>
+      <div className={`sidebar ${drawerOpen ? "open" : ""}`}>
         <Sidebar
-          activeRoom={activeRoom}
-          onSelectRoom={handleSelectRoom}
-          onClose={() => setSidebarOpen(false)}
-          rooms={rooms}  
-          unreadCounts={unreadCounts}
+          activeRoom={currentRoom}
+          onSelectRoom={openRoom}
+          onClose={() => setDrawerOpen(false)}
+          rooms={rooms}
+          unreadCounts={badges}
         />
       </div>
 
       <ChatArea
-        room={activeRoom}
-        onToggleSidebar={() => setSidebarOpen((v) => !v)}
+        room={currentRoom}
+        onToggleSidebar={() => setDrawerOpen((v) => !v)}
         onSearchOpen={() => setSearchOpen((v) => !v)}
         searchOpen={searchOpen}
       />
 
-      {toast && <div className="toast animate-fadeIn">{toast}</div>}
+      {toast.message && (
+        <div className="toast animate-fadeIn">{toast.message}</div>
+      )}
     </div>
   );
 }
